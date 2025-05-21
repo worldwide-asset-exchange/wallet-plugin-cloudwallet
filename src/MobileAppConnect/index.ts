@@ -1,6 +1,5 @@
 /** @format */
 
-// import { WaxJS } from "..";
 import {IDappInfo, ILoginResponse, IWhitelistedContract} from '../interfaces'
 import { API, Amplify, graphqlOperation } from 'aws-amplify';
 import {GraphQLSubscription} from '@aws-amplify/api'
@@ -8,8 +7,7 @@ import {v4 as uuidv4} from 'uuid'
 import {LoginContext, PromptElement, Cancelable, PromptResponse} from '@wharfkit/session'
 import { MobileAppConnectConfig } from '../interfaces';
 import { ActivationHandler } from '../ActivationManager';
-// export const LS_ACTIVATION_KEY = 'dapp_activated';
-
+import { decodeSignatures } from '../helpers';
 declare global {
     interface Window {
         closeCustomPopup?: () => void
@@ -98,13 +96,12 @@ class InvalidCodeError extends Error {
 
 export class MobileAppConnect {
     private user?: ILoginResponse
-    private isCanceled: boolean = false;
     private _isConnected: boolean = false;
+    private isCanceled: boolean = false;
     private connectedType: 'direct' | 'remote' | null = null;
     private listenDirectConnect: boolean = false;
     private listenDirectTransact: boolean = false;
     private WAX_SCHEME_DEEPLINK = 'mycloudwallet';
-    private transactionResult?: { transaction_id: string };
     private broadcastChannel?: BroadcastChannel;
     private activationEndpoint = 'https://login-api.mycloudwallet.com'    
     private relayEndpoint = 'https://ljk5ki565rcivky4sqi5rqg6bi.appsync-api.us-east-2.amazonaws.com/graphql'
@@ -132,7 +129,6 @@ export class MobileAppConnect {
 
     public deactivate(): void {
         this.user = undefined
-        //this._isConnected = false;
         this.connectedType = null;
         this.listenDirectConnect = false;
         this.listenDirectTransact = false;
@@ -144,7 +140,6 @@ export class MobileAppConnect {
     }
 
     public async showAppConnectPrompt(context: LoginContext) {
-        let currentPromptResponse: Cancelable<PromptResponse> | undefined
         const elements: PromptElement[] = []
         let requisitionInfo: RequisitionInfo | undefined
         let directConnectPromiseResolve: (value: any) => void;
@@ -180,36 +175,38 @@ export class MobileAppConnect {
             })
         }
         // Show the prompt UI
-        currentPromptResponse = context.ui?.prompt({
+        const currentPromptResponse = context.ui.prompt({
             title: 'Connect with My Cloud Wallet',
             body: 'Connect My Cloud Wallet on your mobile device',
             elements,
         })
         currentPromptResponse.catch((error:any) => {
             console.info('User cancelled modal:', error.message)
-            //this._isConnected = false;
-            if (error.message !== 'finish-activation') {
-                this.connectedType = null;
-            }
-            this.isCanceled = true
         })
         // No longer waiting for prompt — go straight to activation
         if (requisitionInfo) {
             checkActivationPromise = this.checkActivation(
                 context,
-                requisitionInfo,
-                currentPromptResponse!,
-                elements
+                requisitionInfo
             )
         }
-        if (checkActivationPromise) {
-            const result = await Promise.race([
-                directConnectPromise,
-                checkActivationPromise
-            ]);
-            return result;
-        } else {
-            return await directConnectPromise;
+        try {
+            if (checkActivationPromise) {
+                return await Promise.race([
+                    directConnectPromise,
+                    checkActivationPromise])
+            } else {
+                return await directConnectPromise;
+            }
+        } catch (error) {
+            console.log('showAppConnectPrompt::directConnectPromise::error', error);
+            if (error instanceof ActivationCancelledError) {
+                console.log('currentPromptResponse', typeof currentPromptResponse);
+                //context.ui.onLoginComplete;
+                this.isCanceled = true;
+                this.connectedType = null;
+            }
+            throw error;
         }
     }
 
@@ -369,9 +366,7 @@ export class MobileAppConnect {
 
     private async checkActivation(
         context: LoginContext,
-        requisitionInfo: RequisitionInfo,
-        promptResponse: Cancelable<PromptResponse>,
-        elements: PromptElement[],
+        requisitionInfo: RequisitionInfo
     ) {
         try {
             const activatedData = await this.checkIfActivated(
@@ -381,7 +376,7 @@ export class MobileAppConnect {
             if (!!activatedData) {
                 this.user = activatedData
                 this.connectedType = 'remote';
-                promptResponse.cancel('finish-activation', true);
+                context.ui.onLoginComplete();
                 return this.user
             }
         } catch (error) {
@@ -443,10 +438,8 @@ export class MobileAppConnect {
         return new Promise<ActivatedData>((resolve, reject) => {
             const intervalId = setInterval(async () => {
                 const currentTimestamp = Math.floor(Date.now() / 1000)
-                console.log('this.isCanceled', this.isCanceled)
-                if(!!this.isCanceled) {
+                if(this.user || this.isCanceled) {
                     clearInterval(intervalId)
-                    reject(new ActivationCancelledError())
                 }
                 if (currentTimestamp > requisitionInfo.expire) {
                     console.log(
@@ -538,6 +531,7 @@ export class MobileAppConnect {
             setTimeout(() => {
                 const elapsed = Date.now() - now;
                 if (elapsed < timeout + 100) {
+                    this.isCanceled = true;
                     reject(new ActivationDeepLinkError());
                 } else {
                     resolve(); // App likely opened
@@ -559,12 +553,20 @@ export class MobileAppConnect {
             return new Promise((resolve, reject) => {
                 const timeout = setTimeout(() => {
                     this.listenDirectConnect = false;
+                    this.isCanceled = true;
                     reject(new Error('Connection timeout'));
                 }, 180000); // 3 minutes timeout
 
                 this.setupEventListener(this.handleDirectConnectResponse)
-                    .then((data) => resolve(data))
-                    .catch((error) => reject(error))
+                    .then((data) =>{
+                        console.log('===directConnect::data', data);
+                        resolve(data)
+                    })
+                    .catch((error) => {
+                        console.log('===directConnect::error', error);
+                        this.isCanceled = true;
+                        reject(error)
+                    })
                     .finally(() => {
                         this.removeEventListener();
                         clearTimeout(timeout);
@@ -626,9 +628,8 @@ export class MobileAppConnect {
         
         if (txid) {
             this.listenDirectTransact = false;
-            const signatures = this.decodeSignatures(encodedSignatures);
+            const signatures = decodeSignatures(encodedSignatures);
             console.log('handleDirectTransactResponse::signatures', signatures);
-            this.transactionResult = { transaction_id: txid };
             return { signatures }
         } 
         
@@ -641,7 +642,7 @@ export class MobileAppConnect {
     private handleDirectConnectResponse(url: string): ILoginResponse | void {
         console.log('handleDirectConnectResponse::url', url);
         const account = this.extractURL(url, 'account', false);
-        const error = decodeURI(this.extractURL(url, 'error', false));
+        const errorName = decodeURI(this.extractURL(url, 'error', false));
         
         if (account) {
             console.log("[dapp deeplink] account found", account);
@@ -657,36 +658,16 @@ export class MobileAppConnect {
             return this.user;
         }
         
-        if (error) {
+        if (errorName) {
+            console.log('handleDirectConnectResponse::errorName', errorName);
             this.listenDirectConnect = false;
-            throw new Error(error);
+            let errorMessage = 'Direct connection error';
+            if (errorName === 'ConnectRejected') {
+                errorMessage = 'User rejected the connection';
+            }
+            throw new ActivationCancelledError(errorMessage);
         }
     }
-
-    // private setupConnectEventListener(): Promise<any> {
-    //     return new Promise((resolve, reject) => {
-    //         try {
-    //             if (this.mobileAppConnectConfig?.direct?.broadcastChannel) {
-    //                 this.broadcastChannel = new BroadcastChannel(this.mobileAppConnectConfig.direct.broadcastChannel);
-    //                 this.broadcastChannel.onmessage = (event: MessageEvent) => {
-    //                 if (event.data && typeof event.data === 'string') {
-    //                         const url = event.data;
-    //                         console.log('handleDeeplinkResponse', url, this.listenDirectTransact, this.listenDirectConnect);
-    //                         resolve(this.handleDirectConnectResponse(url))
-    //                         return null;
-    //                     } else {
-    //                         throw new Error('Invalid event data');
-    //                     }
-                        
-    //                 };
-    //             } else {
-    //                 reject(new Error('Broadcast channel config missing'));
-    //             }
-    //         } catch (err) {
-    //             reject(err);
-    //         }
-    //     });
-    // }
 
     private setupEventListener(handler: (url: string) => any): Promise<any> {
         return new Promise((resolve, reject) => {
@@ -694,20 +675,28 @@ export class MobileAppConnect {
                 if (this.mobileAppConnectConfig?.direct?.broadcastChannel) {
                     this.broadcastChannel = new BroadcastChannel(this.mobileAppConnectConfig.direct.broadcastChannel);
                     this.broadcastChannel.onmessage = (event: MessageEvent) => {
-                    if (event.data && typeof event.data === 'string') {
+                        if (event.data && typeof event.data === 'string') {
                             const url = event.data;
                             console.log('handleDeeplinkResponse', url, this.listenDirectTransact, this.listenDirectConnect);
-                            resolve(handler(url))
+                            try {
+                                const result = handler(url)
+                                if(result) {
+                                    resolve(result)
+                                }
+                            } catch (error) {
+                                console.log('setupEventListener::handler::error', error);
+                                reject(error)
+                            }
                             return null;
                         } else {
-                            throw new Error('Invalid event data');
+                            reject(new Error('Invalid event data'));
                         }
-                        
                     };
                 } else {
                     reject(new Error('Broadcast channel config missing'));
                 }
             } catch (err) {
+                console.log('setupEventListener::error', err);
                 reject(err);
             }
         });
@@ -719,32 +708,4 @@ export class MobileAppConnect {
             this.broadcastChannel = undefined;
         }
     }
-
-    private decodeSignatures(encoded: string): any[] {
-        try {
-          // Step 1: Replace URL-safe characters
-          let base64 = encoded.replace(/-/g, '+').replace(/_/g, '/');
-      
-          // Step 2: Pad the base64 string (length should be multiple of 4)
-          while (base64.length % 4 !== 0) {
-            base64 += '=';
-          }
-      
-          // Step 3: Decode from base64
-          const jsonString = atob(base64);
-      
-          // Step 4: Parse JSON
-          const parsed = JSON.parse(jsonString);
-      
-          // Validate it's an array
-          if (!Array.isArray(parsed)) {
-            throw new Error('Decoded signatures is not an array');
-          }
-      
-          return parsed;
-        } catch (err) {
-          console.error('Failed to decode signatures:', err);
-          return [];
-        }
-      }
 }

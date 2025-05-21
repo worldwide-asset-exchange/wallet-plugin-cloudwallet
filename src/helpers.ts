@@ -226,3 +226,31 @@ export const createLogoIcon = () => {
   data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDIiIGhlaWdodD0iNDAiIHZpZXdCb3g9IjAgMCA0MiA0MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPGcgaWQ9Ikdyb3VwIj4KPHBhdGggaWQ9IlZlY3RvciIgZD0iTTEwLjkyNzEgMjQuMDcyMkM4LjY3NDQxIDIxLjgyMTUgOC42NzQ0MSAxOC4xNzQ1IDEwLjkyNzEgMTUuOTI3OEwxNi45MjI0IDkuOTM3ODFDMTkuMTc1MSA3LjY4NzA2IDIyLjgyNTMgNy42ODcwNiAyNS4wNzQgOS45Mzc4MUwyNy4xODYyIDEyLjA0ODFMMzMuMDI0OCA2LjIxNDY0TDMwLjkxMjYgNC4xMDQzMUMyNS40MzU0IC0xLjM2ODEgMTYuNTU3IC0xLjM2ODEgMTEuMDc5NyA0LjEwNDMxTDUuMDg0NDkgMTAuMDk0M0MtMC4zOTI3NDcgMTUuNTY2NyAtMC4zOTI3NDcgMjQuNDM3MyA1LjA4NDQ5IDI5LjkwOTdMNy4xODg2NSAzMi4wMTJMMTMuMDI3MyAyNi4xNzg1TDEwLjkyMzEgMjQuMDc2MkwxMC45MjcxIDI0LjA3MjJaIiBmaWxsPSJ1cmwoI3BhaW50MF9yYWRpYWxfNDRfNjgwKSIvPgo8cGF0aCBpZD0iVmVjdG9yXzIiIGQ9Ik0zNi45MTE2IDEwLjA5NDVMMzQuNzk5NCA3Ljk4NDEzTDI4Ljk2MDggMTMuODE3NkwzMS4wNzMgMTUuOTI4QzMzLjMyNTcgMTguMTc4NyAzMy4zMjU3IDIxLjgyNTcgMzEuMDczIDI0LjA3MjRMMjMuODUzIDE2Ljg1ODhDMjIuMjM4NyAxNS4yNDU5IDE5LjYyNDYgMTUuMjQ1OSAxOC4wMTQ0IDE2Ljg1ODhDMTYuNDAwMSAxOC40NzE2IDE2LjQwMDEgMjEuMDgzNCAxOC4wMTQ0IDIyLjY5MjNMMjUuMjM0NCAyOS45MDU5TDI1LjA3NzggMzAuMDYyNEMyMi44MjUgMzIuMzEzMSAxOS4xNzQ5IDMyLjMxMzEgMTYuOTI2MSAzMC4wNjI0TDE0LjgwNTkgMjcuOTQ0TDguOTY3MjkgMzMuNzc3NUwxMS4wODc1IDM1Ljg5NTlDMTYuNTY0NyA0MS4zNjgzIDI1LjQ0MzIgNDEuMzY4MyAzMC45MjA0IDM1Ljg5NTlMMzEuMDc3IDM1LjczOTRMMzYuOTE1NyAyOS45MDU5QzQyLjM5MjkgMjQuNDMzNSA0Mi4zOTI5IDE1LjU2MjkgMzYuOTE1NyAxMC4wOTA0TDM2LjkxMTYgMTAuMDk0NVoiIGZpbGw9InVybCgjcGFpbnQxX3JhZGlhbF80NF82ODApIi8+CjwvZz4KPGRlZnM+CjxyYWRpYWxHcmFkaWVudCBpZD0icGFpbnQwX3JhZGlhbF80NF82ODAiIGN4PSIwIiBjeT0iMCIgcj0iMSIgZ3JhZGllbnRVbml0cz0idXNlclNwYWNlT25Vc2UiIGdyYWRpZW50VHJhbnNmb3JtPSJ0cmFuc2xhdGUoMTYuOTkxOCA1LjI4NzEyKSByb3RhdGUoOTApIHNjYWxlKDIyLjM2MDEgMjIuMzg1NCkiPgo8c3RvcCBzdG9wLWNvbG9yPSIjNjZGRUYyIi8+CjxzdG9wIG9mZnNldD0iMSIgc3RvcC1jb2xvcj0iIzAwQ0ZEQyIvPgo8L3JhZGlhbEdyYWRpZW50Pgo8cmFkaWFsR3JhZGllbnQgaWQ9InBhaW50MV9yYWRpYWxfNDRfNjgwIiBjeD0iMCIgY3k9IjAiIHI9IjEiIGdyYWRpZW50VW5pdHM9InVzZXJTcGFjZU9uVXNlIiBncmFkaWVudFRyYW5zZm9ybT0idHJhbnNsYXRlKDI0Ljk5NTQgMjMuOTkyMikgcm90YXRlKDkwKSBzY2FsZSgxNi4wMDggMTYuMDI4MikiPgo8c3RvcCBzdG9wLWNvbG9yPSIjQzdBNUVBIi8+CjxzdG9wIG9mZnNldD0iMSIgc3RvcC1jb2xvcj0iIzdENEJBMyIvPgo8L3JhZGlhbEdyYWRpZW50Pgo8L2RlZnM+Cjwvc3ZnPgo=`;
   return element;
 };
+
+export const decodeSignatures = (encoded: string): any[] => {
+  try {
+    // Step 1: Replace URL-safe characters
+    let base64 = encoded.replace(/-/g, '+').replace(/_/g, '/');
+
+    // Step 2: Pad the base64 string (length should be multiple of 4)
+    while (base64.length % 4 !== 0) {
+      base64 += '=';
+    }
+
+    // Step 3: Decode from base64
+    const jsonString = atob(base64);
+
+    // Step 4: Parse JSON
+    const parsed = JSON.parse(jsonString);
+
+    // Validate it's an array
+    if (!Array.isArray(parsed)) {
+      throw new Error('Decoded signatures is not an array');
+    }
+
+    return parsed;
+  } catch (err) {
+    console.error('Failed to decode signatures:', err);
+    return [];
+  }
+}

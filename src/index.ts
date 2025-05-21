@@ -129,6 +129,7 @@ export class WalletPluginCloudWallet extends AbstractWalletPlugin implements Wal
 
     async mobileConnect(context: LoginContext): Promise<WalletPluginLoginResponse> {
         const t = context.ui.getTranslate(this.id)
+        let mobileConnectError: Error | null = null
         if (!context.chain) {
             throw new Error('A chain must be selected to login with.')
         }
@@ -145,28 +146,33 @@ export class WalletPluginCloudWallet extends AbstractWalletPlugin implements Wal
                 console.log('ActivationDeepLinkError calling waxLogin');
                 return this.waxLogin(context)
             } else {
-                throw error;
+                mobileConnectError = error;
             }
         }
         if(!user) {
-            throw new Error(
-                t('error.closed', {
-                    default: 'Cloud Wallet closed before the login was completed',
-                })
-            )
+            if (mobileConnectError?.name !== 'ActivationCancelledError') {
+                mobileConnectError = new Error(
+                    t('error.closed', {
+                        default: 'Cloud Wallet closed before the login was completed',
+                    })
+                )
+            }
         }
         return new Promise((resolve, reject) => {
             if (!context.chain) {
                 throw new Error('A chain must be selected to login with.')
             }
-            
-            resolve({
-                chain: context.chain.id,
-                permissionLevel: PermissionLevel.from({
-                    actor: user.account,
-                    permission: 'active',
-                }),
-            })
+            if(mobileConnectError) {
+                reject(mobileConnectError);
+            } else {
+                resolve({
+                    chain: context.chain.id,
+                    permissionLevel: PermissionLevel.from({
+                        actor: user.account,
+                        permission: 'active',
+                    }),
+                })
+            }
         });      
     }
     async waxLogin(context: LoginContext): Promise<WalletPluginLoginResponse> {
