@@ -1,7 +1,7 @@
 {
     "name": "@wharfkit/wallet-plugin-cloudwallet",
     "description": "A WalletPlugin for the WAX Cloud Wallet for use within the @wharfkit/session.",
-    "version": "1.5.0-beta.1",
+    "version": "1.5.0-beta.3",
     "homepage": "https://github.com/wharfkit/wallet-plugin-cloudwallet",
     "license": "BSD-3-Clause",
     "main": "lib/wallet-plugin-cloudwallet.js",
@@ -16,8 +16,7 @@
         "prepare": "make"
     },
     "dependencies": {
-        "@aws-amplify/api": "^6.3.11",
-        "@aws-amplify/api-graphql": "^4.7.15",
+        "@aws-amplify/api": "6.3.11",
         "aws-amplify": "5.3.26",
         "tslib": "^2.1.0",
         "uuid": "^11.1.0"
@@ -57,5 +56,8 @@
         "typedoc": "^0.23.14",
         "typescript": "^4.1.2",
         "yarn-deduplicate": "^6.0.1"
+    },
+    "resolutions": {
+        "source-map-loader": "disable"
     }
 }

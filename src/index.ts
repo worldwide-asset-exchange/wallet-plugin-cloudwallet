@@ -140,7 +140,9 @@ export class WalletPluginCloudWallet extends AbstractWalletPlugin implements Wal
             user = await this.mobileAppConnect.showAppConnectPrompt(context);
             console.log('mobileConnect user', user);
         } catch (error: any) {
+            console.log('mobileConnect error', error, error?.name);
             if (error.name === 'ActivationDeepLinkError') {
+                console.log('ActivationDeepLinkError calling waxLogin');
                 return this.waxLogin(context)
             } else {
                 throw error;
@@ -248,7 +250,7 @@ export class WalletPluginCloudWallet extends AbstractWalletPlugin implements Wal
         context: TransactContext
     ): Cancelable<WalletPluginSignResponse> {
         let promise: Promise<WalletPluginSignResponse>
-        if((this.mobileAppConnect instanceof MobileAppConnect)) {
+        if((this.mobileAppConnect instanceof MobileAppConnect && this.mobileAppConnect.getConnectedType() !== null)) {
             promise = this.mobileSign(resolved, context)
         } else {
             promise = this.waxSign(resolved, context)
@@ -268,12 +270,18 @@ export class WalletPluginCloudWallet extends AbstractWalletPlugin implements Wal
         if(!(this.mobileAppConnect instanceof MobileAppConnect)) {
             throw new Error('MobileAppConnect is not initialized')
         }
+        let mobileSignCancelResolve: any;
+        let mobileSignCancelReject: any;
+        const mobileSignCancelPromise = new Promise((resolve, reject) => {
+            mobileSignCancelResolve = resolve;
+            mobileSignCancelReject = reject;
+        });
         const t = context.ui.getTranslate(this.id)
 
         const expiration = resolved.transaction.expiration.toDate()
         const now = new Date()
         const timeout = Math.floor(expiration.getTime() - now.getTime())
-
+        console.log('timeout', timeout);
 
         let promptPromise: Cancelable<PromptResponse> = cancelable(new Promise(() => {}))
         if (!allowAutosign(resolved, this.data)) {
@@ -291,19 +299,23 @@ export class WalletPluginCloudWallet extends AbstractWalletPlugin implements Wal
             })
 
             // Clear the timeout if the UI throws (which generally means it closed)
-            promptPromise.catch(() => clearTimeout(timer))
+            promptPromise.catch((error) => {
+                clearTimeout(timer)
+                mobileSignCancelReject(error)
+            })
         }
         const timer = setTimeout(() => {
             if (!context.ui) {
                 throw new Error('No UI defined')
             }
-            promptPromise.cancel('The request expired, please try again.')
+            promptPromise.cancel('The request expired, please try again.')            
         }, timeout)
-
-        return this.mobileAppConnect.signTransaction(resolved.request.getRawActions(), {
+        
+        const signPromise = this.mobileAppConnect.signTransaction(resolved.request.getRawActions(), {
             broadcast: false,
             sign: true,
-        }) as Promise<WalletPluginSignResponse>;
+        });
+        return Promise.race([mobileSignCancelPromise, signPromise]) as Promise<WalletPluginSignResponse>
     }
 
 

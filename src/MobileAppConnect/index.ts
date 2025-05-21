@@ -139,6 +139,10 @@ export class MobileAppConnect {
         this.removeEventListener();
     }
 
+    public getConnectedType(): 'direct' | 'remote' | null {
+        return this.connectedType;
+    }
+
     public async showAppConnectPrompt(context: LoginContext) {
         let currentPromptResponse: Cancelable<PromptResponse> | undefined
         const elements: PromptElement[] = []
@@ -210,9 +214,6 @@ export class MobileAppConnect {
     }
 
     public remoteTransact(transaction: any, namedParams: any) : Promise<{signatures: any[]}> {
-        if (!this.connectedType) {
-            throw new Error('Activation_NotActivated!!!');
-        }
         console.log('remoteTransact::', {transaction, namedParams})
         const origin = this.dAppInfo.origin || 'localhost'
         const channelName = `dapp:${origin}:${this.user?.account}`;
@@ -360,7 +361,7 @@ export class MobileAppConnect {
         }
         console.log('signTransaction::', {transaction, namedParams})
         if (this.connectedType === 'direct') {
-            return await this.directTransact(transaction, namedParams);
+            return this.directTransact(transaction, namedParams);
         } else {
             return this.remoteTransact(transaction, namedParams);
         }
@@ -480,7 +481,7 @@ export class MobileAppConnect {
                         throw new Error(`Network response was not ok: ${response.status}`)
                     }
 
-                    const data = await response.json()
+                    const data = await response.json()      
 
                     if (response.status === 202) {
                         console.log('Continuing pulling checkActivation')
@@ -511,26 +512,50 @@ export class MobileAppConnect {
             description: this.dAppInfo.description,
         }
     }
+      
+    
 
-    private async openDeeplink(link: string): Promise<void> {
-        try {
+    private _openDeeplink(link: string): Promise<void> {
+        const timeout = 1500;
+        const now = Date.now();
+    
+        const isIOSSafari =
+            /iP(hone|ad|od)/.test(navigator.userAgent) &&
+            /Safari/.test(navigator.userAgent) &&
+            !/CriOS|FxiOS|OPiOS/.test(navigator.userAgent); // Exclude Chrome/Firefox on iOS
+    
+        return new Promise<void>((resolve, reject) => {
             console.log('openDeeplink::link', link);
-            //window.open(link, '_blank');
             window.location.href = link;
-        } catch (error) {
-            throw new ActivationDeepLinkError();
-        }
+    
+            if (isIOSSafari) {
+                // Safari on iOS: always resolve, no fallback
+                resolve();
+                return;
+            }
+    
+            // Non-Safari: use timeout-based fallback
+            setTimeout(() => {
+                const elapsed = Date.now() - now;
+                if (elapsed < timeout + 100) {
+                    reject(new ActivationDeepLinkError());
+                } else {
+                    resolve(); // App likely opened
+                }
+            }, timeout);
+        });
+    }
+
+    private openDeeplink(link: string) {        
+        window.location.href = link;
     }
 
     public async directConnect(): Promise<ILoginResponse | void> {
-        if (this.connectedType) {
-            return this.user;
-        }
         this.listenDirectConnect = true;
         const callbackUrl = btoa(window.location.origin + '/' + this.mobileAppConnectConfig.direct?.callbackUri);
         const link = `${this.WAX_SCHEME_DEEPLINK}://connect?schema=${this.dAppInfo.schema}&dapp=${this.dAppInfo.origin}&origin=${this.dAppInfo.origin}&logourl=${this.dAppInfo.logoUrl}&description=${this.dAppInfo.description}&antelope=antelope-1&callbackHttp=${callbackUrl}`;
         try {
-            await this.openDeeplink(link);
+            await this._openDeeplink(link);
             return new Promise((resolve, reject) => {
                 const timeout = setTimeout(() => {
                     this.listenDirectConnect = false;
@@ -551,7 +576,7 @@ export class MobileAppConnect {
         }
     }
 
-    public async directTransact(actions: any[], namedParams: any) : Promise<{signatures: any[]}>  {
+    public directTransact(actions: any[], namedParams: any) : Promise<{signatures: any[]}>  {
         if (!this.connectedType || this.connectedType === 'remote') {
             throw new Error('Invalid connection type, expect direct connection');
         }
@@ -561,7 +586,7 @@ export class MobileAppConnect {
         const link = `${this.WAX_SCHEME_DEEPLINK}://transact?transaction=${enccodeTransactions}&schema=${this.dAppInfo.schema}&callbackHttp=${callbackUrl}&redirect=true`;
         console.log('[provider] directTransact', link);
         try {
-            await this.openDeeplink(link);
+            this.openDeeplink(link);
             return new Promise((resolve, reject) => {
                 const timeout = setTimeout(() => {                    
                     reject(new Error('Transaction timeout'));
