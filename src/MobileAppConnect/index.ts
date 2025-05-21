@@ -182,6 +182,8 @@ export class MobileAppConnect {
         })
         currentPromptResponse.catch((error:any) => {
             console.info('User cancelled modal:', error.message)
+            directConnectPromiseReject(error)
+            this.isCanceled = true;
         })
         // No longer waiting for prompt — go straight to activation
         if (requisitionInfo) {
