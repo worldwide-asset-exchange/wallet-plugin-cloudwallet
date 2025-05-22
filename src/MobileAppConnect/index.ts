@@ -6,7 +6,6 @@ import {GraphQLSubscription} from '@aws-amplify/api'
 import {v4 as uuidv4} from 'uuid'
 import {LoginContext, PromptElement, Cancelable, PromptResponse} from '@wharfkit/session'
 import { MobileAppConnectConfig } from '../interfaces';
-import { ActivationHandler } from '../ActivationManager';
 import { decodeSignatures } from '../helpers';
 declare global {
     interface Window {
@@ -107,7 +106,6 @@ export class MobileAppConnect {
     private relayEndpoint = 'https://ljk5ki565rcivky4sqi5rqg6bi.appsync-api.us-east-2.amazonaws.com/graphql'
     private relayRegion = 'us-east-2'
     private dAppInfo: IDappInfo
-    private activationHandler: ActivationHandler;
     constructor(
         readonly mobileAppConnectConfig: MobileAppConnectConfig
     ) {
@@ -176,7 +174,7 @@ export class MobileAppConnect {
         }
         // Show the prompt UI
         const currentPromptResponse = context.ui.prompt({
-            title: 'Connect with My Cloud Wallet',
+            title: 'Connect with My Cloud Wallet!!',
             body: 'Connect My Cloud Wallet on your mobile device',
             elements,
         })
