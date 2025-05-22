@@ -114,7 +114,6 @@ export class MobileAppConnect {
         }
         this.mobileAppConnectConfig = mobileAppConnectConfig
         this.dAppInfo = mobileAppConnectConfig.dappInfo
-        this.activationHandler = new ActivationHandler(this.activationEndpoint, this.dAppInfo);
         const myAppConfig = {
             aws_appsync_graphqlEndpoint: this.relayEndpoint,
             aws_appsync_region: this.relayRegion,
