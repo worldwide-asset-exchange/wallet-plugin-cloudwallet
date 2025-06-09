@@ -110,7 +110,7 @@ export class MobileAppConnect {
         this.mobileAppConnectConfig = mobileAppConnectConfig
         this.dAppInfo = mobileAppConnectConfig.dappInfo
         new SyncHandlerConfig({
-            graphQLRelayEndpoint: 'https://ljk5ki565rcivky4sqi5rqg6bi.appsync-api.us-east-2.amazonaws.com/graphql',
+            graphQLRelayEndpoint: 'https://queue-relay.mycloudwallet.com/graphql',
             graphQLRelayRegion: 'us-east-2',
             eventRelayEndpoint: 'https://direct-connect-api.mycloudwallet.com/event',
             eventRelayRegion: 'eu-east-2'
