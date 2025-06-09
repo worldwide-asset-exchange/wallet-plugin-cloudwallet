@@ -1,12 +1,19 @@
 /** @format */
 
-import {IDappInfo, ILoginResponse, IWhitelistedContract} from '../interfaces'
-import { API, Amplify, graphqlOperation } from 'aws-amplify';
-import {GraphQLSubscription} from '@aws-amplify/api'
+import {IDappInfo, ILoginResponse} from '../interfaces'
 import {v4 as uuidv4} from 'uuid'
-import {LoginContext, PromptElement, Cancelable, PromptResponse} from '@wharfkit/session'
+import {LoginContext, PromptElement} from '@wharfkit/session'
 import { MobileAppConnectConfig } from '../interfaces';
-import { decodeSignatures } from '../helpers';
+import { generateReturnUrl, getDeviceHash, isChromeiOS, isIOSSafari } from '../helpers';
+import { TransactionSyncHandler, SyncHandlerConfig } from '../SyncHandler';
+import { TransactionMessage } from '../SyncHandler/transaction';
+import {events} from 'aws-amplify/data'
+import { popupLogin } from '../login';
+
+
+const MCW_CONNECT_UNIVERSAL_LINK = 'https://mycloudwallet.com/connect';
+const MCW_TRANSACT_UNIVERSAL_LINK = 'https://mycloudwallet.com/transact';
+
 declare global {
     interface Window {
         closeCustomPopup?: () => void
@@ -49,15 +56,6 @@ interface ActivatedData {
     userAccount?: string
 }
 
-export interface TransactionMessage {
-    id: string
-    type: 'requesting' | 'approved' | 'rejected' | 'error' | 'ready' | 'not-ready'
-    actions?: any
-    namedParams?: any
-    dapp?: string
-    result?: any
-}
-
 class ActivationFetchError extends Error {
     constructor(message = '') {
         super(message)
@@ -95,17 +93,14 @@ class InvalidCodeError extends Error {
 
 export class MobileAppConnect {
     private user?: ILoginResponse
-    private _isConnected: boolean = false;
     private isCanceled: boolean = false;
-    private connectedType: 'direct' | 'remote' | null = null;
-    private listenDirectConnect: boolean = false;
-    private listenDirectTransact: boolean = false;
+    private connectedType: 'direct' | 'remote' | 'web' | null = null;
     private WAX_SCHEME_DEEPLINK = 'mycloudwallet';
-    private broadcastChannel?: BroadcastChannel;
     private activationEndpoint = 'https://login-api.mycloudwallet.com'    
-    private relayEndpoint = 'https://ljk5ki565rcivky4sqi5rqg6bi.appsync-api.us-east-2.amazonaws.com/graphql'
-    private relayRegion = 'us-east-2'
+    private transactionSyncHandler: TransactionSyncHandler;
     private dAppInfo: IDappInfo
+    private uuid: string;
+
     constructor(
         readonly mobileAppConnectConfig: MobileAppConnectConfig
     ) {
@@ -114,25 +109,22 @@ export class MobileAppConnect {
         }
         this.mobileAppConnectConfig = mobileAppConnectConfig
         this.dAppInfo = mobileAppConnectConfig.dappInfo
-        const myAppConfig = {
-            aws_appsync_graphqlEndpoint: this.relayEndpoint,
-            aws_appsync_region: this.relayRegion,
-            aws_appsync_authenticationType: 'AWS_LAMBDA',
+        new SyncHandlerConfig({
+            graphQLRelayEndpoint: 'https://ljk5ki565rcivky4sqi5rqg6bi.appsync-api.us-east-2.amazonaws.com/graphql',
+            graphQLRelayRegion: 'us-east-2',
+            eventRelayEndpoint: 'https://direct-connect-api.mycloudwallet.com/event',
+            eventRelayRegion: 'eu-east-2'
+        })
+        // Initialize transaction SyncHandler
+        this.transactionSyncHandler = new TransactionSyncHandler();
+        this.uuid = uuidv4();
+        const connectedType = localStorage.getItem('connectedType');
+        if (connectedType === 'direct' || connectedType === 'remote' || connectedType === 'web') {
+            this.connectedType = connectedType;
         }
-        Amplify.configure(myAppConfig)
-        this.handleDirectConnectResponse = this.handleDirectConnectResponse.bind(this);
-        this.handleDirectTransactResponse = this.handleDirectTransactResponse.bind(this);
     }
 
-    public deactivate(): void {
-        this.user = undefined
-        this.connectedType = null;
-        this.listenDirectConnect = false;
-        this.listenDirectTransact = false;
-        this.removeEventListener();
-    }
-
-    public getConnectedType(): 'direct' | 'remote' | null {
+    public getConnectedType(): 'direct' | 'remote' | 'web' | null {
         return this.connectedType;
     }
 
@@ -162,7 +154,7 @@ export class MobileAppConnect {
                     variant: 'primary',
                     onClick: async () => {
                         try {
-                            const result = await this.directConnect(); // Wait for deeplink response
+                            const result = await this.directConnect(context); // Wait for deeplink response
                             directConnectPromiseResolve(result);       // Resolve outer promise
                         } catch (error) {
                             directConnectPromiseReject(error);
@@ -173,12 +165,12 @@ export class MobileAppConnect {
         }
         // Show the prompt UI
         const currentPromptResponse = context.ui.prompt({
-            title: 'Connect with My Cloud Wallet!!',
+            title: 'Connect with My Cloud Wallet!!!',
             body: 'Connect My Cloud Wallet on your mobile device',
             elements,
         })
         currentPromptResponse.catch((error:any) => {
-            console.info('User cancelled modal:', error.message)
+            console.info('User cancelled modal::', error.message)
             directConnectPromiseReject(error)
             this.isCanceled = true;
         })
@@ -209,155 +201,88 @@ export class MobileAppConnect {
         }
     }
 
-    public remoteTransact(transaction: any, namedParams: any) : Promise<{signatures: any[]}> {
+    public remoteTransact(transaction: any, namedParams: any): Promise<{signatures: any[]}> {
+        if (!this.user?.account || !this.user?.token) {
+            throw new Error('User not authenticated');
+        }
+
         console.log('remoteTransact::', {transaction, namedParams})
         const origin = this.dAppInfo.origin || 'localhost'
-        const channelName = `dapp:${origin}:${this.user?.account}`;
-        const txInfo: TransactionMessage = {
-            id: uuidv4(),
-            type: 'requesting',
-            actions: transaction,
-            namedParams,
-            dapp: origin,
-        }
+        const channelName = this.transactionSyncHandler.generateChannelName(origin, this.user.account);
+        const txInfo = this.transactionSyncHandler.generateTransactionMessage(transaction, namedParams, origin);
         
-        API.graphql(
-            graphqlOperation(
-            publish2channel,
-            {
-                name: channelName,
-                data: JSON.stringify(txInfo),
-            },
-            JSON.stringify({
-                account: this.user?.account,
-                token: this.user?.token,
-                svc: origin,
-                mode: 'dapp',
-            })
-            )
-        );
+        const authHeaders: string = TransactionSyncHandler.parseAuthHeaders(this.user.account, this.user.token, origin)
         
         return new Promise((resolve, reject) => {
-            let subscription
-            const currentTxInfo = txInfo
+            let subscription;
+            const currentTxInfo = txInfo;
             console.log(
                 `start listening on ${channelName} with transaction ID = ${currentTxInfo.id}...`
-            )
-            // Add timeout promise
-            const timeoutPromise = new Promise((_, reject) : any => {
-                setTimeout(() => {
-                subscription?.unsubscribe();
-                reject(new Error('Transaction timeout after 3 minutes'));
-                }, 180000); // 3 minutes in milliseconds
-            });
-            try {
-                const query = `
-                    subscription Subscribe2channel($name: String!) {
-                        subscribe2channel(name: $name) {
-                            data
-                            name
-                            __typename
-                        }
-                    }
-                `
-                //Subscribe via WebSockets
-                const graphqlOption = graphqlOperation(
-                    query,
-                    {
-                        name: channelName,
-                    },
-                    JSON.stringify({
-                        account: this.user?.account,
-                        token: this.user?.token,
-                        svc: origin,
-                        mode: 'dapp',
-                    })
-                );
+            );
 
-                const subscriptionPromise = new Promise((resolve, reject): any => {
-                    subscription = (API.graphql<
-                    GraphQLSubscription<Subscribe2channelSubscription>
-                    >(graphqlOption) as any).subscribe({
-                    next: ({ provider: _, value }) => {
-                        console.log('tx!!', value.data?.subscribe2channel?.data);
-                        const txRes: TransactionMessage = JSON.parse(
-                        value.data?.subscribe2channel?.data || ''
-                        );
-                        if (txRes.id !== currentTxInfo.id) {
+            // Publish transaction request
+            this.transactionSyncHandler.publishToChannel(channelName, txInfo, authHeaders)
+                .catch(error => {
+                    console.error('Failed to publish to channel:', error);
+                    reject(error);
+                });
+
+            // Subscribe to channel for response
+            subscription = this.transactionSyncHandler.subscribeToChannel<TransactionMessage>(
+                channelName,
+                (message) => {
+                    if (message.id !== currentTxInfo.id) {
                         return;
-                        }
-        
-                        switch (txRes.type) {
+                    }
+
+                    switch (message.type) {
                         case 'requesting':
                             console.log('tx requesting...');
                             break;
                         case 'approved':
-                            let signatures;
-                            // Decode base64 signatures if they exist
-                            if (txRes.result?.signatures) {
-                                console.log('txRes.result.signatures', txRes.result.signatures);
-                                signatures = txRes.result.signatures.map((sig: string) => {
-                                    try {
-                                    // Check if the signature is base64 encoded
-                                    if (/^[A-Za-z0-9+/=]+$/.test(sig)) {
-                                        return atob(sig);
-                                    }
-                                    return sig;
-                                    } catch (e) {
-                                    console.warn('Failed to decode signature:', e);
-                                    return sig;
-                                    }
-                                });
+                            try {
+                                const result = this.transactionSyncHandler.processTransactionResult(message);
+                                resolve(result);
+                            } catch (error) {
+                                console.error('Failed to process transaction result:', error);
+                                reject(error);
                             }
-                            console.log('signatures::::', signatures);
-                            resolve({
-                                signatures
-                            });
-                            subscription?.unsubscribe();
                             break;
                         case 'rejected':
                             reject(new Error('User rejected the transaction'));
-                            subscription?.unsubscribe();
-                            break;
-                        case 'ready':
-                            // ignore
                             break;
                         case 'error':
-                            reject(new Error(txRes.result));
-                            subscription?.unsubscribe();
+                            reject(new Error(message.result));
                             break;
                         default:
-                            console.log(`Unknown status: ${JSON.stringify(txRes)}`);
+                            console.log(`Unknown status: ${JSON.stringify(message)}`);
                             break;
-                        }
-                    },
-                    error: (error) => {
-                        subscription?.unsubscribe();
-                        reject(error);
-                    },
-                    });
-                });
-        
-                // Race between the subscription and timeout
-                Promise.race([subscriptionPromise, timeoutPromise])
-                    .then((value) => resolve(value as {signatures: any[]}))
-                    .catch(reject);
-            } catch (error) {
-                subscription?.unsubscribe()
-                reject(error)
-            }
-        })
-        
+                    }
+                },
+                (error) => {
+                    console.error('Subscription error:', error);
+                    reject(error);
+                },
+                authHeaders
+            );
+
+            // Cleanup subscription on completion
+            return {
+                unsubscribe: () => {
+                    subscription?.unsubscribe();
+                }
+            };
+        });
     }
     
 
     public async signTransaction(transaction: any, namedParams: any) : Promise<any> {
-        if (!this.connectedType) {
+        if (!this.connectedType || this.connectedType === 'web') {
             throw new Error('Activation_NotActivated!!!');
         }
         console.log('signTransaction::', {transaction, namedParams})
         if (this.connectedType === 'direct') {
-            return this.directTransact(transaction, namedParams);
+            return await this.directTransact(transaction, namedParams);
         } else {
             return this.remoteTransact(transaction, namedParams);
         }
@@ -497,214 +422,210 @@ export class MobileAppConnect {
 
     private getActivationPayload() {
         return {
-            origin: this.dAppInfo.origin || 'localhost',
+            origin: this.dAppInfo.origin,
             dAppName: this.dAppInfo.name,
             logourl: this.dAppInfo.logoUrl,
             schema: this.dAppInfo.schema,
             description: this.dAppInfo.description,
         }
     }
-      
-    
 
-    private _openDeeplink(link: string): Promise<void> {
-        const timeout = 1500;
-        const now = Date.now();
-    
-        const isIOSSafari =
-            /iP(hone|ad|od)/.test(navigator.userAgent) &&
-            /Safari/.test(navigator.userAgent) &&
-            !/CriOS|FxiOS|OPiOS/.test(navigator.userAgent); // Exclude Chrome/Firefox on iOS
-    
-        return new Promise<void>((resolve, reject) => {
-            console.log('openDeeplink::link', link);
-            window.location.href = link;
-    
-            if (isIOSSafari) {
-                // Safari on iOS: always resolve, no fallback
+    private openDeepLinkWithFallback(link: string): Promise<void> {
+        return new Promise((resolve, reject) => {
+            const timeoutId = setTimeout(() => {
+            reject(new ActivationDeepLinkError('App likely not installed, fallback triggered.'));
+            }, 4000);
+            const clear = () => {
+                clearTimeout(timeoutId);
                 resolve();
-                return;
-            }
-    
-            // Non-Safari: use timeout-based fallback
-            setTimeout(() => {
-                const elapsed = Date.now() - now;
-                if (elapsed < timeout + 100) {
-                    this.isCanceled = true;
-                    reject(new ActivationDeepLinkError());
-                } else {
-                    resolve(); // App likely opened
+            };
+            window.addEventListener('pagehide', clear, { once: true });
+            window.addEventListener('blur', clear, { once: true });
+            document.addEventListener('visibilitychange', () => {
+                if (document.visibilityState === 'hidden') {
+                  clear();
                 }
-            }, timeout);
+              }, { once: true });
+            
+            window.location.href = link;
         });
     }
 
-    private openDeeplink(link: string) {        
-        window.location.href = link;
-    }
-
-    public async directConnect(): Promise<ILoginResponse | void> {
-        this.listenDirectConnect = true;
-        const callbackUrl = btoa(window.location.origin + '/' + this.mobileAppConnectConfig.direct?.callbackUri);
-        const link = `${this.WAX_SCHEME_DEEPLINK}://connect?schema=${this.dAppInfo.schema}&dapp=${this.dAppInfo.origin}&origin=${this.dAppInfo.origin}&logourl=${this.dAppInfo.logoUrl}&description=${this.dAppInfo.description}&antelope=antelope-1&callbackHttp=${callbackUrl}`;
+    public async directConnect(context: LoginContext): Promise<ILoginResponse | void> {
+        const callbackUrl = btoa(generateReturnUrl() || '');
+        const deviceHash = encodeURIComponent('1234567890');
+        this.uuid = uuidv4();
+    
+        const link = `${this.WAX_SCHEME_DEEPLINK}://connect?schema=${this.dAppInfo.schema || 'none'}&dapp=${this.dAppInfo.origin || ''}&origin=${this.dAppInfo.origin || ''}&logourl=${this.dAppInfo.logoUrl || ''}&description=${this.dAppInfo.description || ''}&antelope=antelope-1&callbackHttp=${callbackUrl}&uuid=${this.uuid}&deviceHash=${deviceHash}`;
+    
         try {
-            await this._openDeeplink(link);
-            return new Promise((resolve, reject) => {
-                const timeout = setTimeout(() => {
-                    this.listenDirectConnect = false;
-                    this.isCanceled = true;
-                    reject(new Error('Connection timeout'));
-                }, 180000); // 3 minutes timeout
-
-                this.setupEventListener(this.handleDirectConnectResponse)
-                    .then((data) =>{
-                        console.log('===directConnect::data', data);
-                        resolve(data)
-                    })
-                    .catch((error) => {
-                        console.log('===directConnect::error', error);
-                        this.isCanceled = true;
-                        reject(error)
-                    })
-                    .finally(() => {
-                        this.removeEventListener();
-                        clearTimeout(timeout);
-                    })
-            });
+            await this.openDeepLinkWithFallback(link);
         } catch (error) {
-            this.listenDirectConnect = false;
+            console.error('Failed to open deeplink:', error);
             throw error;
         }
-    }
+    
+        return new Promise(async (resolve, reject) => {
+            const timeout = setTimeout(() => {
+                this.isCanceled = true;
+                cleanup();
+                reject(new Error('Connection timeout'));
+            }, 180000); // 3 min
+    
+            let subscription: any;
+            let interval: any;
+            const cleanup = () => {
+                clearTimeout(timeout);
+                clearInterval(interval);
+                subscription?.unsubscribe?.();
+            };
+    
+            const connectToDevice = async () => {
+                try {
+                    const re = await events.connect(`/device-connect/${this.uuid}`, { authToken: this.uuid });
+                    subscription = re.subscribe({
+                        next: (data) => {
+                            if (data?.type === 'data' && data?.event?.accountName) {
+                                this.user = {
+                                    account: data.event.accountName,
+                                    keys: [],
+                                    isTemp: false,
+                                    createData: {},
+                                    token: ''
+                                };
+                                this.connectedType = 'direct';
+                                localStorage.setItem('connectedType', this.connectedType);
+                                cleanup();
+                                resolve(this.user);
+                                re.close();
+                                return;
+                            } else if (data?.event?.error) {
+                                const msg = data.event.error === 'ConnectRejected'
+                                    ? 'User rejected the connection'
+                                    : 'Direct connection error';
+                                cleanup();
+                                reject(new ActivationCancelledError(msg));
+                                re.close();
+                                return;
+                            } else {
+                                cleanup();
+                                reject(new Error('Invalid account'));
+                                re.close();
+                                return;
+                            }
+                        },
+                        error: (err) => {
+                            console.error('Subscription error:', err);
+                            cleanup();
+                            reject(err);
+                            re.close();
+                            return;
+                        }
+                    });
+                } catch (err) {
+                    cleanup();
+                    reject(err);
+                }
+            };
+            interval = setInterval(() => {
+                if (document.hasFocus()) {
+                    connectToDevice();
+                }
+            }, 500);
+        });
+    }    
 
-    public directTransact(actions: any[], namedParams: any) : Promise<{signatures: any[]}>  {
+    public async directTransact(actions: any[], namedParams: any): Promise<{signatures: any[]}> {
         if (!this.connectedType || this.connectedType === 'remote') {
             throw new Error('Invalid connection type, expect direct connection');
         }
-        this.listenDirectTransact = true;
-        const enccodeTransactions = btoa(JSON.stringify(actions));
-        const callbackUrl = btoa(window.location.origin + '/' + this.mobileAppConnectConfig.direct?.callbackUri);
-        const link = `${this.WAX_SCHEME_DEEPLINK}://transact?transaction=${enccodeTransactions}&schema=${this.dAppInfo.schema}&callbackHttp=${callbackUrl}&redirect=true`;
-        console.log('[provider] directTransact', link);
-        try {
-            this.openDeeplink(link);
-            return new Promise((resolve, reject) => {
-                const timeout = setTimeout(() => {                    
-                    reject(new Error('Transaction timeout'));
-                }, 180000); // 3 minutes timeout
 
-                this.setupEventListener(this.handleDirectTransactResponse)
-                    .then((data) => resolve(data))
-                    .catch((error) => reject(error))
-                    .finally(() => {
-                        this.listenDirectTransact = false;
-                        this.removeEventListener();
-                        clearTimeout(timeout);
-                    })
-            });
+        const encodeTransactions = btoa(JSON.stringify(actions));
+        const callbackUrl = btoa(generateReturnUrl() || '');
+        const deviceHash = encodeURIComponent('1234567890');
+        this.uuid = uuidv4();
+        const link = `${this.WAX_SCHEME_DEEPLINK}://transact?transaction=${encodeTransactions}&schema=${this.dAppInfo.schema || 'none'}&callbackHttp=${callbackUrl}&redirect=true&deviceHash=${deviceHash}&uuid=${this.uuid}`;
+        
+        try {
+            await this.openDeepLinkWithFallback(link);
         } catch (error) {
-            this.listenDirectTransact = false;
+            console.error('Failed to open deeplink:', error);
             throw error;
         }
-    }
 
-    private extractURL(url: string, param: string, shouldDecode: boolean = true): string {
-        const regex = new RegExp(`[?&]${param}=([^&]*)`);
-        const match = regex.exec(url);
-        if (match === null) {
-            return '';
-        }
-        return shouldDecode ? decodeURIComponent(match[1]) : match[1];
-    }
+        return new Promise(async (resolve, reject) => {
+            const timeout = setTimeout(() => {
+                cleanup();
+                reject(new Error('Transaction timeout'));
+            }, 180000); // 3 min
 
-    private handleDirectTransactResponse(url: string) {
-        console.log('handleDirectTransactResponse::url', url);
-        const txid = this.extractURL(url, 'txid', false);
-        const encodedSignatures = this.extractURL(url, 'signatures', false);
-        console.log('handleDirectTransactResponse::txid', txid);
-        console.log('handleDirectTransactResponse::encodedSignatures', encodedSignatures);
-        const error = decodeURI(this.extractURL(url, 'error', false));
-        
-        if (txid) {
-            this.listenDirectTransact = false;
-            const signatures = decodeSignatures(encodedSignatures);
-            console.log('handleDirectTransactResponse::signatures', signatures);
-            return { signatures }
-        } 
-        
-        if (error) {
-            this.listenDirectTransact = false;
-            throw new Error(error);
-        }
-    }
-
-    private handleDirectConnectResponse(url: string): ILoginResponse | void {
-        console.log('handleDirectConnectResponse::url', url);
-        const account = this.extractURL(url, 'account', false);
-        const errorName = decodeURI(this.extractURL(url, 'error', false));
-        
-        if (account) {
-            console.log("[dapp deeplink] account found", account);
-            this.listenDirectConnect = false;
-            this.connectedType = 'direct';
-            this.user = {
-                account: account,
-                keys: [],
-                isTemp: false,
-                createData: {},
-                token: ''
+            let subscription: any;
+            let interval: any;
+            const cleanup = () => {
+                clearTimeout(timeout);
+                clearInterval(interval);
+                subscription?.unsubscribe?.();
             };
-            return this.user;
-        }
-        
-        if (errorName) {
-            console.log('handleDirectConnectResponse::errorName', errorName);
-            this.listenDirectConnect = false;
-            let errorMessage = 'Direct connection error';
-            if (errorName === 'ConnectRejected') {
-                errorMessage = 'User rejected the connection';
-            }
-            throw new ActivationCancelledError(errorMessage);
-        }
-    }
 
-    private setupEventListener(handler: (url: string) => any): Promise<any> {
-        return new Promise((resolve, reject) => {
-            try {
-                if (this.mobileAppConnectConfig?.direct?.broadcastChannel) {
-                    this.broadcastChannel = new BroadcastChannel(this.mobileAppConnectConfig.direct.broadcastChannel);
-                    this.broadcastChannel.onmessage = (event: MessageEvent) => {
-                        if (event.data && typeof event.data === 'string') {
-                            const url = event.data;
-                            console.log('handleDeeplinkResponse', url, this.listenDirectTransact, this.listenDirectConnect);
-                            try {
-                                const result = handler(url)
-                                if(result) {
-                                    resolve(result)
-                                }
-                            } catch (error) {
-                                console.log('setupEventListener::handler::error', error);
-                                reject(error)
+            const transact = async () => {
+                try {
+                    const re = await events.connect(`/device-transact/${this.uuid}`, { authToken: this.uuid });
+                    subscription = re.subscribe({
+                        next: (data) => {
+                            if (data?.type === 'data' && data?.event?.txid && data?.event?.signatures) {
+                                cleanup();
+                                resolve({signatures: data.event.signatures});
+                                re.close();
+                                return;
+                            } else if (data?.event?.error) {
+                                const msg = data.event.error === 'TransactionDeclined'
+                                    ? 'User rejected the transaction'
+                                    : 'Direct Transact error';
+                                cleanup();
+                                reject(new Error(msg));
+                                re.close()
+                                return;
+                            } else {
+                                cleanup();
+                                reject(new Error('Transaction unknown error'));
+                                re.close();
+                                return;
                             }
-                            return null;
-                        } else {
-                            reject(new Error('Invalid event data'));
+                        },
+                        error: (err) => {
+                            alert('subscription error::' + err?.message);
+                            console.error('Subscription error:', err);
+                            cleanup();
+                            reject(err);
+                            re.close();
+                            return;
                         }
-                    };
-                } else {
-                    reject(new Error('Broadcast channel config missing'));
+                    });
+                } catch (err) {
+                    cleanup();
+                    reject(err);
+                    return;
                 }
-            } catch (err) {
-                console.log('setupEventListener::error', err);
-                reject(err);
-            }
+            };
+            interval = setInterval(() => {
+                if (document.hasFocus()) {
+                    transact();
+                }
+            }, 350);
+            return;
         });
     }
 
-    private removeEventListener() {
-        if (this.broadcastChannel) {
-            this.broadcastChannel.close();
-            this.broadcastChannel = undefined;
-        }
+    public async cleanup(): Promise<void> {
+        // Reset connection state
+        this.connectedType = null;
+        this.user = undefined;
+        this.isCanceled = false;
+        
+        // Clear stored connection type
+        localStorage.removeItem('connectedType');
+        
+        // Close all event connections
+        await events.closeAll();
     }
 }

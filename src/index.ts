@@ -21,6 +21,8 @@ import {
     Name,
     TimePointSec,
     Signature,
+    PromptElement,
+    LogoutContext,
 } from '@wharfkit/session'
 
 import {autoLogin, popupLogin} from './login'
@@ -30,6 +32,7 @@ import {validateModifications} from './utils'
 import defaultTranslations from './translations'
 import {MobileAppConnect} from './MobileAppConnect';
 import {WalletPluginCloudWalletOptions} from './interfaces';
+import { isAndroid, isIos } from './helpers'
 
 
 
@@ -116,15 +119,87 @@ export class WalletPluginCloudWallet extends AbstractWalletPlugin implements Wal
      */
     login(context: LoginContext): Cancelable<WalletPluginLoginResponse> {
         let promise;
-        if(this.mobileAppConnect instanceof MobileAppConnect) {
-            promise = this.mobileConnect(context)
+        // if is android, ipad, ios, show login prompt
+        if (isAndroid() || isIos()) {
+            promise = this.showLoginPrompt(context)
         } else {
             promise = this.waxLogin(context)
         }
+
         return cancelable(promise, (canceled) => {
             console.log('[login]canceled', canceled);
             throw canceled
         })
+    }
+
+    async showLoginPrompt(context: LoginContext): Promise<any> {
+        let directConnectPromiseResolve: (value: any) => void;
+        let directConnectPromiseReject: (reason?: any) => void;
+        const directConnectPromise = new Promise((resolve, reject) => {
+            directConnectPromiseResolve = resolve;
+            directConnectPromiseReject = reject;
+        });
+        let webLoginPromiseResolve: (value: any) => void;
+        let webLoginPromiseReject: (reason?: any) => void;
+        const webLoginPromise = new Promise((resolve, reject) => {
+            webLoginPromiseResolve = resolve;
+            webLoginPromiseReject = reject;
+        });
+        
+        const elements: PromptElement[] = []
+        elements.push({
+            type: 'button',
+                data: {
+                label: 'Open My Cloud Wallet app',
+                variant: 'primary',
+                onClick: async () => {
+                    try {
+                        if(!(this.mobileAppConnect instanceof  MobileAppConnect)) {
+                            throw new Error('Mobile App Connect is not initialized')
+                        }                        
+                        if (!context.chain) {
+                            throw new Error('A chain must be selected to login with.')
+                        }
+                        const user = await this.mobileAppConnect.directConnect(context)
+                        directConnectPromiseResolve({
+                            chain: context.chain.id,
+                            permissionLevel: PermissionLevel.from({
+                                actor: `${user?.account}`,
+                                permission: 'active',
+                            }),
+                        })
+                    } catch (error) {
+                        directConnectPromiseReject(error)
+                    }
+                }
+            }
+        })
+        elements.push({
+            type: 'button',
+            data: {
+                label: 'Login with web',
+                variant: 'primary',
+                onClick: async () => {
+                    try {
+                        const result = await this.waxLogin(context)
+                        webLoginPromiseResolve(result)
+                    } catch (error) {
+                        webLoginPromiseReject(error)
+                    }
+                }
+            }
+        })
+        // Show the prompt UI
+        const currentPromptResponse = context.ui.prompt({
+            title: 'Connect to My Cloud Wallet',
+            body: 'Connect My Cloud Wallet on your mobile device',
+            elements,
+        })
+        currentPromptResponse.catch((error:any) => {
+            console.info('User cancelled modal::', error.message)
+            directConnectPromiseReject(error)
+        })
+        return await Promise.race([directConnectPromise, webLoginPromise])
     }
 
     async mobileConnect(context: LoginContext): Promise<WalletPluginLoginResponse> {
@@ -141,7 +216,8 @@ export class WalletPluginCloudWallet extends AbstractWalletPlugin implements Wal
             user = await this.mobileAppConnect.showAppConnectPrompt(context);
             console.log('mobileConnect user', user);
         } catch (error: any) {
-            console.log('mobileConnect error', error, error?.name);
+            console.log('mobileConnect error', error, error?.name, error?.message);
+            mobileConnectError = error;
             if (error.name === 'ActivationDeepLinkError') {
                 console.log('ActivationDeepLinkError calling waxLogin');
                 return this.waxLogin(context)
@@ -150,6 +226,7 @@ export class WalletPluginCloudWallet extends AbstractWalletPlugin implements Wal
             }
         }
         if(!user) {
+            console.log('mobileConnectError', mobileConnectError?.name);
             if (mobileConnectError?.name !== 'ActivationCancelledError') {
                 mobileConnectError = new Error(
                     t('error.closed', {
@@ -158,6 +235,13 @@ export class WalletPluginCloudWallet extends AbstractWalletPlugin implements Wal
                 )
             }
         }
+        // return {
+        //     userAccount: user?.account,
+        //     autoLogin: true,
+        //     pubKeys: user?.pubKeys,
+        //     verified: true,
+        //     whitelistedContracts: user?.whitelistedContracts,
+        // };
         return new Promise((resolve, reject) => {
             if (!context.chain) {
                 throw new Error('A chain must be selected to login with.')
@@ -195,10 +279,15 @@ export class WalletPluginCloudWallet extends AbstractWalletPlugin implements Wal
             )
         } catch (e) {
             // Fallback to popup login
-            response = await popupLogin(
-                t,
-                `${this.url}/cloud-wallet/login?n=${base64Nonce}&returnTemp=${this.allowTemp}`
-            )
+            try {
+                response = await popupLogin(
+                    t,
+                    `${this.url}/cloud-wallet/login?n=${base64Nonce}&returnTemp=${this.allowTemp}`
+                )
+            } catch (e) {
+                console.log('waxLogin::error', e);
+                return await this.mobileConnect(context)
+            }
         }
 
         // If failed due to no response or no verified response, throw error
@@ -222,6 +311,7 @@ export class WalletPluginCloudWallet extends AbstractWalletPlugin implements Wal
             if (!context.chain) {
                 throw new Error('A chain must be selected to login with.')
             }
+            localStorage.setItem('connectedType', 'web');
             // Return to session's transact call
             resolve({
                 chain: context.chain.id,
@@ -256,9 +346,13 @@ export class WalletPluginCloudWallet extends AbstractWalletPlugin implements Wal
         context: TransactContext
     ): Cancelable<WalletPluginSignResponse> {
         let promise: Promise<WalletPluginSignResponse>
-        if((this.mobileAppConnect instanceof MobileAppConnect && this.mobileAppConnect.getConnectedType() !== null)) {
+        const connectedType = localStorage.getItem('connectedType');
+        if((this.mobileAppConnect instanceof MobileAppConnect 
+            && (connectedType === 'direct' || connectedType === 'remote'))) {
+            console.log('mobileSign');
             promise = this.mobileSign(resolved, context)
         } else {
+            console.log('waxSign');
             promise = this.waxSign(resolved, context)
         }
         return cancelable(promise, (canceled) => {
@@ -476,6 +570,13 @@ export class WalletPluginCloudWallet extends AbstractWalletPlugin implements Wal
 
         // Return the response from the API
         return response
+    }
+
+    async logout(context: LogoutContext): Promise<void> {
+        if (this.mobileAppConnect) {
+            await this.mobileAppConnect.cleanup();
+        }
+        return;
     }
 }
 

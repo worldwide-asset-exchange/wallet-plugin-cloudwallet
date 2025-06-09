@@ -25,7 +25,7 @@ export interface IDappInfo {
   logoUrl?: string;
   schema?: string;
   description?: string;
-  origin?: string;
+  origin: string;
 }
 
 export interface MobileAppConnectConfig {

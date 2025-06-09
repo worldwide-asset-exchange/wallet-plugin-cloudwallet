@@ -254,3 +254,162 @@ export const decodeSignatures = (encoded: string): any[] => {
     return [];
   }
 }
+
+export async function getDeviceHash() {
+  const info = getDeviceInfo();
+  // 1. Canonicalize the object (sort keys)
+  const sortedInfo = Object.keys(info)
+    .sort()
+    .reduce((obj, key) => {
+      obj[key] = info[key];
+      return obj;
+    }, {});
+
+  // 2. Stringify to JSON
+  const json = JSON.stringify(sortedInfo);
+
+  // 3. Hash with SHA-256
+  const encoder = new TextEncoder();
+  const data = encoder.encode(json);
+  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+
+  // 4. Convert to hex string
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+  return hashHex;
+}
+
+const getDeviceInfo = () => {
+  return {
+    screenWidth: window.screen.width,
+    screenHeight: window.screen.height,
+    devicePixelRatio: window.devicePixelRatio,
+    platform: navigator.platform,
+    language: navigator.language,
+    languages: navigator.languages,
+    timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    hardwareConcurrency: navigator.hardwareConcurrency || 'Unavailable',
+    touchSupport: 'ontouchstart' in window,
+  };
+};
+
+export const isIos = () => { 
+  return navigator.userAgent.includes('iPhone') || navigator.userAgent.includes('iPad');
+};
+
+export const isChrome = () => {
+  return navigator.userAgent.includes('Chrome');
+}
+
+export function isIOSSafari(): boolean {
+  const ua = navigator.userAgent;
+  const isIOS = /iP(ad|od|hone)/i.test(ua);
+  const isSafari = /Safari/i.test(ua) && 
+    !/CriOS|FxiOS|OPiOS|EdgiOS|Chrome|Firefox|Opera|Edge/i.test(ua) &&
+    /AppleWebKit/i.test(ua);
+  return isIOS && isSafari;
+}
+
+export function generateReturnUrl(): string | undefined {
+  // Return undefined for iOS React Native apps to prevent redirect to Safari
+  if (isAppleHandheld() && isReactNativeApp()) {
+      return undefined
+  }
+
+  if (isChromeiOS()) {
+      // google chrome on iOS will always open new tab so we just ask it to open again as a workaround
+      return 'googlechrome://'
+  }
+  if (isFirefoxiOS()) {
+      // same for firefox
+      return 'firefox:://'
+  }
+  if (isAppleHandheld() && isBrave()) {
+      // and brave ios
+      return 'brave://'
+  }
+  if (isAppleHandheld()) {
+      // return url with unique fragment required for iOS safari to trigger the return url
+      const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
+      let rv = window.location.href.split('#')[0] + '#'
+      for (let i = 0; i < 8; i++) {
+          rv += alphabet.charAt(Math.floor(Math.random() * alphabet.length))
+      }
+      return rv
+  }
+
+  if (isAndroid() && isFirefox()) {
+      return 'android-app://org.mozilla.firefox'
+  }
+
+  if (isAndroid() && isEdge()) {
+      return 'android-app://com.microsoft.emmx'
+  }
+
+  if (isAndroid() && isOpera()) {
+      return 'android-app://com.opera.browser'
+  }
+
+  if (isAndroid() && isBrave()) {
+      return 'android-app://com.brave.browser'
+  }
+
+  if (isAndroid() && isAndroidWebView()) {
+      return 'android-app://webview'
+  }
+
+  if (isAndroid() && isChromeMobile()) {
+      return 'android-app://com.android.chrome'
+  }
+
+  return window.location.href
+}
+
+export function isAppleHandheld() {
+  return /iP(ad|od|hone)/i.test(navigator.userAgent)
+}
+
+export function isChromeiOS() {
+  return /CriOS/.test(navigator.userAgent)
+}
+
+export function isChromeMobile() {
+  return /Chrome\/[.0-9]* Mobile/i.test(navigator.userAgent)
+}
+
+export function isFirefox() {
+  return /Firefox/i.test(navigator.userAgent)
+}
+
+export function isFirefoxiOS() {
+  return /FxiOS/.test(navigator.userAgent)
+}
+
+export function isOpera() {
+  return /OPR/.test(navigator.userAgent) || /Opera/.test(navigator.userAgent)
+}
+
+export function isEdge() {
+  return /Edg/.test(navigator.userAgent)
+}
+
+export function isBrave() {
+  return navigator['brave'] && typeof navigator['brave'].isBrave === 'function'
+}
+
+export function isAndroid() {
+  return /Android/.test(navigator.userAgent)
+}
+
+export function isReactNativeApp() {
+  // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+  // @ts-ignore
+  return !!window.ReactNativeWebView
+}
+
+export function isAndroidWebView() {
+  return (
+      /wv/.test(navigator.userAgent) ||
+      (/Android/.test(navigator.userAgent) && isReactNativeApp())
+  )
+}
