@@ -147,33 +147,35 @@ export class WalletPluginCloudWallet extends AbstractWalletPlugin implements Wal
         });
         
         const elements: PromptElement[] = []
-        elements.push({
-            type: 'button',
-                data: {
-                label: 'Open My Cloud Wallet app',
-                variant: 'primary',
-                onClick: async () => {
-                    try {
-                        if(!(this.mobileAppConnect instanceof  MobileAppConnect)) {
-                            throw new Error('Mobile App Connect is not initialized')
-                        }                        
-                        if (!context.chain) {
-                            throw new Error('A chain must be selected to login with.')
+        if((this.mobileAppConnect instanceof MobileAppConnect)) {
+            elements.push({
+                type: 'button',
+                    data: {
+                    label: 'Open My Cloud Wallet app',
+                    variant: 'primary',
+                    onClick: async () => {
+                        try {
+                            if(!(this.mobileAppConnect instanceof MobileAppConnect)) {
+                                throw new Error('Mobile App Connect is not initialized')
+                            }                        
+                            if (!context.chain) {
+                                throw new Error('A chain must be selected to login with.')
+                            }
+                            const user = await this.mobileAppConnect.directConnect(context)
+                            directConnectPromiseResolve({
+                                chain: context.chain.id,
+                                permissionLevel: PermissionLevel.from({
+                                    actor: `${user?.account}`,
+                                    permission: 'active',
+                                }),
+                            })
+                        } catch (error) {
+                            directConnectPromiseReject(error)
                         }
-                        const user = await this.mobileAppConnect.directConnect(context)
-                        directConnectPromiseResolve({
-                            chain: context.chain.id,
-                            permissionLevel: PermissionLevel.from({
-                                actor: `${user?.account}`,
-                                permission: 'active',
-                            }),
-                        })
-                    } catch (error) {
-                        directConnectPromiseReject(error)
                     }
                 }
-            }
-        })
+            })
+        }
         elements.push({
             type: 'button',
             data: {
