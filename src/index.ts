@@ -34,8 +34,6 @@ import {MobileAppConnect} from './MobileAppConnect';
 import {WalletPluginCloudWalletOptions} from './interfaces';
 import { isAndroid, isIos } from './helpers'
 
-
-
 export class WalletPluginCloudWallet extends AbstractWalletPlugin implements WalletPlugin {
     /**
      * The unique identifier for the wallet plugin.
@@ -162,12 +160,30 @@ export class WalletPluginCloudWallet extends AbstractWalletPlugin implements Wal
                                 throw new Error('A chain must be selected to login with.')
                             }
                             const user = await this.mobileAppConnect.directConnect(context)
+                            // handle proof
+                            const signature = (user as any)?.proof?.data?.signature
+                            const identityProof =  signature &&
+                                IdentityProof.from({
+                                    chainId: ChainId.from(context?.chain?.id),
+                                    scope: Name.from(context.appName || ''),
+                                    expiration: TimePointSec.from(new Date().getTime() / 1000 + 60 * 60),
+                                    signer: PermissionLevel.from({
+                                        actor: `${user?.account}`,
+                                        permission: 'active',
+                                    }),
+                                    signature: Signature.from(signature),
+                                })
+                            this.data.identityProof = identityProof;
+                            this.data.proof = user?.proof;
+                            this.data.isTempAccount = (user as any)?.isTemp;
+                            this.data.whitelist = (user as any)?.whitelistedContracts;
                             directConnectPromiseResolve({
                                 chain: context.chain.id,
                                 permissionLevel: PermissionLevel.from({
                                     actor: `${user?.account}`,
                                     permission: 'active',
                                 }),
+                                identityProof,
                             })
                         } catch (error) {
                             directConnectPromiseReject(error)
@@ -204,63 +220,6 @@ export class WalletPluginCloudWallet extends AbstractWalletPlugin implements Wal
         return await Promise.race([directConnectPromise, webLoginPromise])
     }
 
-    async mobileConnect(context: LoginContext): Promise<WalletPluginLoginResponse> {
-        const t = context.ui.getTranslate(this.id)
-        let mobileConnectError: Error | null = null
-        if (!context.chain) {
-            throw new Error('A chain must be selected to login with.')
-        }
-        if(!(this.mobileAppConnect instanceof  MobileAppConnect)) {
-            throw new Error('Activation requisition is not initialized')
-        }
-        let user: any;
-        try {
-            user = await this.mobileAppConnect.showAppConnectPrompt(context);
-            console.log('mobileConnect user', user);
-        } catch (error: any) {
-            console.log('mobileConnect error', error, error?.name, error?.message);
-            mobileConnectError = error;
-            if (error.name === 'ActivationDeepLinkError') {
-                console.log('ActivationDeepLinkError calling waxLogin');
-                return this.waxLogin(context)
-            } else {
-                mobileConnectError = error;
-            }
-        }
-        if(!user) {
-            console.log('mobileConnectError', mobileConnectError?.name);
-            if (mobileConnectError?.name !== 'ActivationCancelledError') {
-                mobileConnectError = new Error(
-                    t('error.closed', {
-                        default: 'Cloud Wallet closed before the login was completed',
-                    })
-                )
-            }
-        }
-        // return {
-        //     userAccount: user?.account,
-        //     autoLogin: true,
-        //     pubKeys: user?.pubKeys,
-        //     verified: true,
-        //     whitelistedContracts: user?.whitelistedContracts,
-        // };
-        return new Promise((resolve, reject) => {
-            if (!context.chain) {
-                throw new Error('A chain must be selected to login with.')
-            }
-            if(mobileConnectError) {
-                reject(mobileConnectError);
-            } else {
-                resolve({
-                    chain: context.chain.id,
-                    permissionLevel: PermissionLevel.from({
-                        actor: user.account,
-                        permission: 'active',
-                    }),
-                })
-            }
-        });      
-    }
     async waxLogin(context: LoginContext): Promise<WalletPluginLoginResponse> {
         if (!context.chain) {
             throw new Error('A chain must be selected to login with.')
@@ -269,27 +228,37 @@ export class WalletPluginCloudWallet extends AbstractWalletPlugin implements Wal
         // Retrieve translation helper from the UI, passing the app ID
         const t = context.ui.getTranslate(this.id)
 
-        const nonce = context.arbitrary['nonce']
-        const base64Nonce = btoa(nonce)
+        
 
         let response: WAXCloudWalletLoginResponse
+        
+        // Create common search parameters
+        const searchParams = new URLSearchParams();
+        const nonce = context.arbitrary['nonce']
+        if (nonce) {
+            const base64Nonce = btoa(nonce)
+            searchParams.set('n', base64Nonce);
+        }
+        searchParams.set('returnTemp', this.allowTemp.toString());
+        
         try {
             // Attempt automatic login
+            const autoLoginUrl = new URL('/login', this.autoUrl);
+            autoLoginUrl.search = searchParams.toString();
+            
             response = await autoLogin(
                 t,
-                `${this.autoUrl}/login?n=${base64Nonce}&returnTemp=${this.allowTemp}`
+                autoLoginUrl.toString()
             )
         } catch (e) {
             // Fallback to popup login
-            try {
-                response = await popupLogin(
-                    t,
-                    `${this.url}/cloud-wallet/login?n=${base64Nonce}&returnTemp=${this.allowTemp}`
-                )
-            } catch (e) {
-                console.log('waxLogin::error', e);
-                return await this.mobileConnect(context)
-            }
+            const popupLoginUrl = new URL('/cloud-wallet/login', this.url);
+            popupLoginUrl.search = searchParams.toString();
+            
+            response = await popupLogin(
+                t,
+                popupLoginUrl.toString()
+            )
         }
 
         // If failed due to no response or no verified response, throw error
@@ -308,7 +277,22 @@ export class WalletPluginCloudWallet extends AbstractWalletPlugin implements Wal
         // Save our whitelisted contracts
         this.data.whitelist = response.whitelistedContracts
         this.data.isTempAccount = response.isTemp
+        this.data.proof = (response as any)?.proof;
+        
+        console.log('waxLogin::response proof', (response as any)?.proof);
         const signature = (response as any)?.proof?.data?.signature
+        const identityProof =  signature &&
+                    IdentityProof.from({
+                        chainId: ChainId.from(context?.chain?.id),
+                        scope: Name.from(context.appName || ''),
+                        expiration: TimePointSec.from(new Date().getTime() / 1000 + 60 * 60),
+                        signer: PermissionLevel.from({
+                            actor: response.userAccount,
+                            permission: 'active',
+                        }),
+                        signature: Signature.from((response as any)?.proof?.data?.signature),
+                    })
+        this.data.identityProof = identityProof;
         return new Promise((resolve) => {
             if (!context.chain) {
                 throw new Error('A chain must be selected to login with.')
@@ -321,18 +305,7 @@ export class WalletPluginCloudWallet extends AbstractWalletPlugin implements Wal
                     actor: response.userAccount,
                     permission: 'active',
                 }),
-                identityProof:
-                    signature &&
-                    IdentityProof.from({
-                        chainId: ChainId.from(context?.chain?.id),
-                        scope: Name.from(context.appName || ''),
-                        expiration: TimePointSec.from(new Date().getTime() / 1000 + 60 * 60),
-                        signer: PermissionLevel.from({
-                            actor: response.userAccount,
-                            permission: 'active',
-                        }),
-                        signature: Signature.from((response as any)?.proof?.data?.signature),
-                    }),
+                identityProof,
             })
         })
     }

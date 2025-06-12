@@ -56,7 +56,6 @@ const kit = new SessionKit({
                     description: 'A revolutionary blockchain application',
                     schema: 'myawesomeapp://',
                     logoUrl: 'https://myapp.com/logo.png',
-                    origin: 'myapp.com',
                 },
             },
             // ... other plugin options
@@ -69,13 +68,12 @@ const kit = new SessionKit({
 
 The `mobileAppConnectConfig.dappInfo` follows the `IDappInfo` interface structure:
 
-- **name** *(required)*: The display name of your dapp that will be shown to users
-- **origin** *(required)*: The domain origin of your dapp (without protocol)
+- **name** *(optional)*: The display name of your dapp that will be shown to users
 - **logoUrl** *(optional)*: URL to your dapp's logo image that will be displayed during the connection process
 - **schema** *(optional)*: The deep link schema for your dapp (used for redirecting back to your app)
 - **description** *(optional)*: A brief description of your dapp's purpose or functionality
 
-**Note**: The `name` and `origin` properties are required. All other properties are optional and can be omitted if not needed for your use case.
+**Note**: All properties in the `IDappInfo` interface are optional and can be omitted if not needed for your use case.
 
 When properly configured, users on mobile devices will be able to authenticate directly through the MyCloudWallet app without needing to manually enter their credentials or navigate through web-based login flows. The MyCloudWallet app will display your dapp's information during the authentication process, providing users with clear context about the connection request.
 

@@ -99,6 +99,7 @@ export class MobileAppConnect {
     private activationEndpoint = 'https://login-api.mycloudwallet.com'    
     private transactionSyncHandler: TransactionSyncHandler;
     private dAppInfo: IDappInfo
+    private origin: string;
     private uuid: string;
 
     constructor(
@@ -109,6 +110,7 @@ export class MobileAppConnect {
         }
         this.mobileAppConnectConfig = mobileAppConnectConfig
         this.dAppInfo = mobileAppConnectConfig.dappInfo
+        this.origin = location.origin;
         new SyncHandlerConfig({
             graphQLRelayEndpoint: 'https://queue-relay.mycloudwallet.com/graphql',
             graphQLRelayRegion: 'us-east-2',
@@ -140,7 +142,7 @@ export class MobileAppConnect {
         });
 
         if (this.mobileAppConnectConfig.remote) {
-            requisitionInfo = await this.fetchActivationInfo(this.getActivationPayload())
+            requisitionInfo = await this.fetchActivationInfo(this.getActivationPayload(context))
             elements.unshift({
                 type: 'qr',
                 data: requisitionInfo.qrCodeContent,
@@ -207,11 +209,10 @@ export class MobileAppConnect {
         }
 
         console.log('remoteTransact::', {transaction, namedParams})
-        const origin = this.dAppInfo.origin || 'localhost'
-        const channelName = this.transactionSyncHandler.generateChannelName(origin, this.user.account);
-        const txInfo = this.transactionSyncHandler.generateTransactionMessage(transaction, namedParams, origin);
+        const channelName = this.transactionSyncHandler.generateChannelName(this.origin, this.user.account);
+        const txInfo = this.transactionSyncHandler.generateTransactionMessage(transaction, namedParams, this.origin);
         
-        const authHeaders: string = TransactionSyncHandler.parseAuthHeaders(this.user.account, this.user.token, origin)
+        const authHeaders: string = TransactionSyncHandler.parseAuthHeaders(this.user.account, this.user.token, this.origin)
         
         return new Promise((resolve, reject) => {
             let subscription;
@@ -295,7 +296,7 @@ export class MobileAppConnect {
         try {
             const activatedData = await this.checkIfActivated(
                 requisitionInfo,
-                this.dAppInfo.origin || 'localhost'
+                this.origin
             )
             if (!!activatedData) {
                 this.user = activatedData
@@ -420,10 +421,10 @@ export class MobileAppConnect {
         })
     }
 
-    private getActivationPayload() {
+    private getActivationPayload(context: LoginContext) {
         return {
-            origin: this.dAppInfo.origin,
-            dAppName: this.dAppInfo.name,
+            origin: this.origin,
+            dAppName: `${this.dAppInfo.name ||context.appName}`,
             logourl: this.dAppInfo.logoUrl,
             schema: this.dAppInfo.schema,
             description: this.dAppInfo.description,
@@ -456,7 +457,27 @@ export class MobileAppConnect {
         const deviceHash = encodeURIComponent('1234567890');
         this.uuid = uuidv4();
     
-        const link = `${this.WAX_SCHEME_DEEPLINK}://connect?schema=${this.dAppInfo.schema || 'none'}&dapp=${this.dAppInfo.origin || ''}&origin=${this.dAppInfo.origin || ''}&logourl=${this.dAppInfo.logoUrl || ''}&description=${this.dAppInfo.description || ''}&antelope=antelope-1&callbackHttp=${callbackUrl}&uuid=${this.uuid}&deviceHash=${deviceHash}`;
+        // Build the deep link URL with organized parameters
+        const linkParams = new URLSearchParams({
+            schema: this.dAppInfo.schema || 'none',
+            dapp: this.dAppInfo.name || context.appName || '',
+            origin: this.origin,
+            logourl: this.dAppInfo.logoUrl || '',
+            description: this.dAppInfo.description || '',
+            antelope: 'antelope-1',
+            callbackHttp: callbackUrl,
+            uuid: this.uuid,
+            deviceHash: deviceHash,
+        });
+
+        const nonce = context.arbitrary['nonce']
+        // conditionally add non-falsy nonce to the link
+        if (nonce) {
+            const base64Nonce = btoa(nonce)
+            linkParams.set('n', base64Nonce);
+        }
+
+        const link = `${this.WAX_SCHEME_DEEPLINK}://connect?${linkParams.toString()}`;
     
         try {
             await this.openDeepLinkWithFallback(link);
@@ -491,7 +512,8 @@ export class MobileAppConnect {
                                     keys: [],
                                     isTemp: false,
                                     createData: {},
-                                    token: ''
+                                    token: '',
+                                    proof: data.event.proof
                                 };
                                 this.connectedType = 'direct';
                                 localStorage.setItem('connectedType', this.connectedType);

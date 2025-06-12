@@ -18,14 +18,14 @@ export interface ILoginResponse {
   trustScore?: number;
   isProofVerified?: any;
   token?: string;
+  proof?: any;
 }
 
 export interface IDappInfo {
-  name: string;
+  name?: string;
   logoUrl?: string;
   schema?: string;
   description?: string;
-  origin: string;
 }
 
 export interface MobileAppConnectConfig {
