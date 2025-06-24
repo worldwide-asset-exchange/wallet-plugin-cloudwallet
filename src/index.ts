@@ -149,7 +149,7 @@ export class WalletPluginCloudWallet extends AbstractWalletPlugin implements Wal
             elements.push({
                 type: 'button',
                     data: {
-                    label: 'Open My Cloud Wallet app',
+                    label: 'Open My Cloud Wallet app v64-debug-3',
                     variant: 'primary',
                     onClick: async () => {
                         try {
@@ -386,13 +386,9 @@ export class WalletPluginCloudWallet extends AbstractWalletPlugin implements Wal
             promptPromise.cancel('The request expired, please try again.')            
         }, timeout)
         
-        const signPromise = this.mobileAppConnect.signTransaction(resolved.request.getRawActions(), {
-            broadcast: false,
-            sign: true,
-        });
+        const signPromise = this.mobileAppConnect.signTransaction(resolved, context, {});
         return Promise.race([mobileSignCancelPromise, signPromise]) as Promise<WalletPluginSignResponse>
     }
-
 
     async waxSign(
         resolved: ResolvedSigningRequest,

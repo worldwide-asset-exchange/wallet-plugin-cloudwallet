@@ -2,14 +2,23 @@
 
 import {IDappInfo, ILoginResponse} from '../interfaces'
 import {v4 as uuidv4} from 'uuid'
-import {LoginContext, PromptElement} from '@wharfkit/session'
+import {
+    LoginContext,
+    PromptElement,
+    Serializer,
+    Transaction,
+    ResolvedSigningRequest,
+    SigningRequest,
+    TransactContext,
+    ChainId,
+    WalletPluginSignResponse
+} from '@wharfkit/session'
 import { MobileAppConnectConfig } from '../interfaces';
-import { generateReturnUrl, getDeviceHash, isChromeiOS, isIOSSafari } from '../helpers';
+import { decodeSignatureFromWallet, generateReturnUrl } from '../helpers';
 import { TransactionSyncHandler, SyncHandlerConfig } from '../SyncHandler';
 import { TransactionMessage } from '../SyncHandler/transaction';
 import {events} from 'aws-amplify/data'
-import { popupLogin } from '../login';
-
+import {validateModifications} from '../utils'
 
 const MCW_CONNECT_UNIVERSAL_LINK = 'https://mycloudwallet.com/connect';
 const MCW_TRANSACT_UNIVERSAL_LINK = 'https://mycloudwallet.com/transact';
@@ -203,14 +212,13 @@ export class MobileAppConnect {
         }
     }
 
-    public remoteTransact(transaction: any, namedParams: any): Promise<{signatures: any[]}> {
+    public remoteTransact(resolved: ResolvedSigningRequest, context: TransactContext, namedParams: any): Promise<{signatures: any[]}> {
         if (!this.user?.account || !this.user?.token) {
             throw new Error('User not authenticated');
         }
 
-        console.log('remoteTransact::', {transaction, namedParams})
         const channelName = this.transactionSyncHandler.generateChannelName(this.origin, this.user.account);
-        const txInfo = this.transactionSyncHandler.generateTransactionMessage(transaction, namedParams, this.origin);
+        const txInfo = this.transactionSyncHandler.generateTransactionMessage(resolved.request.getRawActions(), namedParams, this.origin);
         
         const authHeaders: string = TransactionSyncHandler.parseAuthHeaders(this.user.account, this.user.token, this.origin)
         
@@ -277,15 +285,14 @@ export class MobileAppConnect {
     }
     
 
-    public async signTransaction(transaction: any, namedParams: any) : Promise<any> {
+    public async signTransaction(resolved: ResolvedSigningRequest, context: TransactContext, namedParams: any) : Promise<any> {
         if (!this.connectedType || this.connectedType === 'web') {
             throw new Error('Activation_NotActivated!!!');
         }
-        console.log('signTransaction::', {transaction, namedParams})
         if (this.connectedType === 'direct') {
-            return await this.directTransact(transaction, namedParams);
+            return await this.directTransact(resolved, context, namedParams);
         } else {
-            return this.remoteTransact(transaction, namedParams);
+            return this.remoteTransact(resolved, context, namedParams);
         }
     }
 
@@ -557,16 +564,28 @@ export class MobileAppConnect {
         });
     }    
 
-    public async directTransact(actions: any[], namedParams: any): Promise<{signatures: any[]}> {
+    public async directTransact(resolved: ResolvedSigningRequest, context: TransactContext, namedParams: any): Promise<{signatures: any[]}> {
         if (!this.connectedType || this.connectedType === 'remote') {
             throw new Error('Invalid connection type, expect direct connection');
         }
 
-        const encodeTransactions = btoa(JSON.stringify(actions));
+        const encodeTransactions = btoa(JSON.stringify(resolved.request.getRawActions()));
         const callbackUrl = btoa(generateReturnUrl() || '');
         const deviceHash = encodeURIComponent('1234567890');
         this.uuid = uuidv4();
-        const link = `${this.WAX_SCHEME_DEEPLINK}://transact?transaction=${encodeTransactions}&schema=${this.dAppInfo.schema || 'none'}&callbackHttp=${callbackUrl}&redirect=true&deviceHash=${deviceHash}&uuid=${this.uuid}`;
+
+        // Build the deep link URL with organized parameters
+        const linkParams = new URLSearchParams({
+            transaction: encodeTransactions,
+            schema: this.dAppInfo.schema || 'none',
+            callbackHttp: callbackUrl,
+            redirect: 'true',
+            deviceHash: deviceHash,
+            uuid: this.uuid,
+            broadcast: 'false'
+        });
+
+        const link = `${this.WAX_SCHEME_DEEPLINK}://transact?${linkParams.toString()}`;
         
         try {
             await this.openDeepLinkWithFallback(link);
@@ -594,15 +613,50 @@ export class MobileAppConnect {
                     const re = await events.connect(`/device-transact/${this.uuid}`, { authToken: this.uuid });
                     subscription = re.subscribe({
                         next: (data) => {
-                            if (data?.type === 'data' && data?.event?.txid && data?.event?.signatures) {
-                                cleanup();
-                                resolve({signatures: data.event.signatures});
-                                re.close();
+                            if (data?.type === 'data' && data?.event?.signatures) {                                                                
+                                const signatures = decodeSignatureFromWallet(data.event.signatures);
+                                            // If a transaction was returned by the WCW
+                                if (data.event.serializedTransaction) {
+                                    // Convert the serialized transaction from the WCW to a Transaction object
+                                    const responseTransaction = Serializer.decode({
+                                        data: data.event.serializedTransaction,
+                                        type: Transaction,
+                                    })
+                                    const result: WalletPluginSignResponse = {
+                                        signatures,
+                                    }
+                                    // Determine if the transaction changed from the requested transaction
+                                    if (!responseTransaction.equals(resolved.transaction)) {
+                                        // Evalutate whether modifications are valid, if not throw error
+                                        validateModifications(resolved.transaction, responseTransaction)
+                                        // If transaction modified, return a new resolved request to Wharf
+                                        SigningRequest.create(
+                                            {
+                                                transaction: responseTransaction,
+                                            },
+                                            context.esrOptions
+                                        ).then((request) => {
+                                            result.resolved = new ResolvedSigningRequest(
+                                                request,
+                                                context.permissionLevel,
+                                                Transaction.from(responseTransaction),
+                                                Serializer.objectify(Transaction.from(responseTransaction)),
+                                                ChainId.from(context.chain.id)
+                                            )
+                                            resolve(result);
+                                            re.close();
+                                        }).catch((err) => {
+                                            cleanup();
+                                            reject(err);
+                                            re.close();
+                                        })
+                                    }
+                                }
                                 return;
                             } else if (data?.event?.error) {
                                 const msg = data.event.error === 'TransactionDeclined'
                                     ? 'User rejected the transaction'
-                                    : 'Direct Transact error';
+                                    : data.event.error;
                                 cleanup();
                                 reject(new Error(msg));
                                 re.close()

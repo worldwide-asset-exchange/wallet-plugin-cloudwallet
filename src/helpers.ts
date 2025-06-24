@@ -413,3 +413,19 @@ export function isAndroidWebView() {
       (/Android/.test(navigator.userAgent) && isReactNativeApp())
   )
 }
+
+export function decodeSignatureFromWallet(encoded: string) {
+  // Convert from URL-safe base64 to standard base64
+  let base64 = encoded.replace(/-/g, '+').replace(/_/g, '/');
+
+  // Add padding if needed
+  while (base64.length % 4 !== 0) {
+    base64 += '=';
+  }
+
+  // Decode base64
+  const jsonStr = Buffer.from(base64, 'base64').toString('utf-8');
+
+  // Parse JSON
+  return JSON.parse(jsonStr);
+}
